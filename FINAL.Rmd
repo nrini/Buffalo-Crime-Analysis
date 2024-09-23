@@ -1,0 +1,284 @@
+```{r}
+
+# packages needed:
+
+library(dplyr)
+library(ggplot2)
+library(sf)
+library(tidyr)
+
+```
+
+```{r}
+
+# loading in data:
+
+buffalo_crime <- read.csv("buffalo_crime_2023.csv")
+
+datetime <- buffalo_crime$Incident.Datetime
+
+year <- substr(datetime, 7, 10)
+
+buffalo_crime <- buffalo_crime %>% 
+  mutate("year" = year) %>% 
+  filter(year == 2023)
+
+datetime <- buffalo_crime$Incident.Datetime
+
+date <- substr(datetime, 0, 10)
+
+time <- substr(datetime, 12, 22)
+
+buffalo_crime <- buffalo_crime %>% 
+  mutate("date" = date, "time" = time, "year" = year)
+
+# removing unnecessary columns:
+
+buffalo_crime <- buffalo_crime %>% 
+  dplyr::select(-c(Case.Number, Incident.ID, Incident.Description, updated_at, Created.At,
+            X2010.Census.Tract, X2010.Census.Block.Group, X2010.Census.Block, Census.Tract, Census.Block, Census.Block.Group, TRACTCE20, GEOID20_tract, GEOID20_block, GEOID20_blockgroup))
+
+buffalo_crime
+
+
+
+```
+
+```{r}
+
+# preparing to convert:
+
+spacial_buff <- buffalo_crime %>% 
+  drop_na(Location, Latitude, Longitude)
+
+# https://www.statology.org/r-remove-rows-with-na-in-one-column/
+
+
+```
+
+```{r}
+
+# converting to spatial object:
+
+buff_shape <- st_as_sf(spacial_buff, coords = c("Longitude", "Latitude"), crs = 4326)
+
+buff_shape
+
+# https://jsta.github.io/glatos-spatial_workshop_materials/03-vector-csv-to-shapefile-in-r/index.html
+
+```
+
+
+```{r}
+
+setwd("Residential")
+
+buff_base <- st_read("geo_export_942b5911.shp")
+
+buff_base <- buff_base %>%  st_transform("EPSG:32116")
+
+buff_base
+
+```
+
+
+```{r}
+
+ggplot() +
+  geom_sf(buff_base, mapping = aes(), color = "lightgrey") +
+  geom_sf(buff_shape, mapping = aes(), color = "red") +
+  theme_minimal()
+
+# looks good  
+
+```
+
+```{r}
+# ANALYSIS:
+
+# instances of each crime type:
+
+crime_type <- buffalo_crime %>% 
+  drop_na(Parent.Incident.Type) %>% 
+  group_by(Parent.Incident.Type) %>% 
+  count(Parent.Incident.Type)
+
+crime_type
+
+```
+
+
+```{r}
+
+# plot:
+
+ggplot(crime_type, aes(x = Parent.Incident.Type, y = n)) +
+  geom_bar(stat = "identity", fill = "darkred") +
+  geom_text(aes(label = n), vjust = -0.2, colour = "white") +
+  labs(x = "Type of Crime", y = "Number of Reports", title = "Reported Crimes in Buffalo, NY (2023)", subtitle = "(Source: Open Data Buffalo)") +
+  theme_dark()
+
+# adding labels to bars:
+# https://r-graphics.org/recipe-bar-graph-labels
+
+```
+
+```{r}
+
+# murder distribution
+
+murders <- buff_shape %>% 
+  filter(Parent.Incident.Type == "Homicide")
+
+ggplot() +
+  geom_sf(buff_base, mapping = aes(), color = "lightgrey") +
+  geom_sf(murders, mapping = aes(), color = "darkred") +
+  theme_classic()
+
+```
+
+```{r}
+
+# use spacial autocorrelation?
+
+robberies <- buff_shape %>% 
+  filter(Parent.Incident.Type == "Robbery")
+
+ggplot() +
+  geom_sf(buff_base, mapping = aes(), color = "lightgrey") +
+  geom_sf(robberies, mapping = aes(), color = "purple4") +
+  theme_classic()
+
+```
+
+```{r}
+
+# PPP
+
+library(spatstat)
+#create a simple ppp object using just the points
+points <- buff_shape %>% 
+  st_transform("EPSG:2263") %>% 
+  filter(Parent.Incident.Type == "Theft of Vehicle")
+
+points <- points["geometry"]
+
+points_ppp <- as.ppp(points)
+
+buff <- buff_base %>% st_transform("EPSG:2263")
+
+#create window from Buffalo shapefile
+buff_owin <- as.owin(buff)
+
+Window(points_ppp) <- buff_owin
+
+plot(points_ppp, main=NULL, pch=20)
+
+```
+
+```{r}
+
+Q <- quadratcount(points_ppp, nx= 5, ny=4)
+
+plot(points_ppp, pch=20, cols="grey70", main=NULL)  # Plot points
+plot(Q, add=TRUE)  # Add quadrat grid
+
+```
+
+```{r}
+
+# rescale
+
+points_ppp.km <- rescale(points_ppp, 1000, "km")
+base.km <- rescale(buff_owin, 1000, "km")
+
+# Compute the density for each quadrat (in counts per km2)
+Q   <- quadratcount(points_ppp.km, nx= 6, ny=3)
+Q.d <- intensity(Q)
+
+# Plot the density
+plot(intensity(Q, image=TRUE), main=NULL, las=1)  # Plot density raster
+plot(points_ppp.km, pch=20, cex=0.6, col=rgb(0,0,0,.5), add=TRUE)  # Add points
+
+```
+
+```{r}
+
+# test for spatial randomness
+
+quadrat.test(points_ppp.km)
+
+```
+
+```{r}
+
+# nearest neighbor distance:
+
+mean(nndist(points_ppp.km, k = 1))
+
+```
+
+
+```{r}
+
+# KERNEL DENSITY
+
+library(raster)
+#This is really easy - calculate kernel density
+dens <- density(points_ppp.km)
+
+#convert into a raster
+rast <- raster(dens)
+
+#use the native raster plotting method to plot it
+plot(rast, main = "Kernel Density of Motor Vehicle Thefts (Buffalo, NY 2023)")
+
+```
+
+```{r}
+
+# KERNEL DENSITY W/ CONTOURS
+
+plot(dens, main=NULL, las=1)
+contour(dens, add=TRUE)
+
+```
+
+```{r}
+
+# spatial autocorrelation - Moran's I Test:
+
+library(spdep)
+
+#This code creates the weights
+buff_morans <- buff_shape %>% 
+  filter(Parent.Incident.Type == "Theft of Vehicle") %>% 
+  #first convert polygons to a neighbor object
+  #R needs to know a unique ID for each neighborhood    
+  #(cartodb_id)
+  #Neighbors determined using Queen weights
+  poly2nb(c('cartodb_id')) %>% 
+  #zero.policy just tells R not to remove 0 values
+  nb2listw(zero.policy = TRUE) 
+
+#Now we can calculate the "Global Moran's I" for the data
+#start with the weights, then give R the corresponding variable
+buff_morans %>% 
+  moran.test(buff_morans$Parent.Incident.Type, ., zero.policy = TRUE)
+
+```
+
+```{r}
+
+cars <- buffalo_crime %>% 
+  filter(Parent.Incident.Type == "Theft of Vehicle")
+
+table(cars$Hour.of.Day)
+
+table(cars$Day.of.Week)
+
+table(cars$Neighborhood)
+
+```
+
+
